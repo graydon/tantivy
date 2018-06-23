@@ -64,8 +64,9 @@ impl SegmentManager {
 
     /// Returns all of the segment entries (committed or uncommitted)
     pub fn segment_entries(&self) -> Vec<SegmentEntry> {
-        let mut segment_entries = self.read().uncommitted.segment_entries();
-        segment_entries.extend(self.read().committed.segment_entries());
+        let registers_lock = self.read();
+        let mut segment_entries = registers_lock.uncommitted.segment_entries();
+        segment_entries.extend(registers_lock.committed.segment_entries());
         segment_entries
     }
 
@@ -94,12 +95,21 @@ impl SegmentManager {
         files
     }
 
-    pub fn segment_entry(&self, segment_id: &SegmentId) -> Option<SegmentEntry> {
+    pub fn segment_entries_from_id(&self, segment_ids: &[SegmentId]) -> Option<Vec<SegmentEntry>> {
         let registers = self.read();
-        registers
-            .committed
-            .segment_entry(segment_id)
-            .or_else(|| registers.uncommitted.segment_entry(segment_id))
+        let mut segment_entries = vec![];
+        for segment_id in segment_ids {
+            let segment_entry_opt = registers
+                .committed
+                .segment_entry(segment_id)
+                .or_else(|| registers.uncommitted.segment_entry(segment_id));
+            if let Some(segment_entry) = segment_entry_opt {
+                segment_entries.push(segment_entry);
+            } else {
+                return None;
+            }
+        }
+        Some(segment_entries)
     }
 
     // Lock poisoning should never happen :

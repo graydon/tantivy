@@ -92,59 +92,54 @@ fn perform_merge(
     mut merged_segment: Segment,
     target_opstamp: u64,
 ) -> Result<SegmentEntry> {
+    assert!(!segment_ids.is_empty(), "Initiated perform_merge with 0 segment_ids.");
     // first we need to apply deletes to our segment.
     info!("Start merge: {:?}", segment_ids);
 
     let index = &segment_updater.0.index;
     let schema = index.schema();
-    let mut segment_entries = vec![];
 
     let mut file_protections: Vec<FileProtection> = vec![];
 
-    for segment_id in segment_ids {
-        if let Some(mut segment_entry) = segment_updater.0.segment_manager.segment_entry(segment_id)
-        {
+    if let Some(mut segment_entries) = segment_updater.0.segment_manager.segment_entries_from_id(segment_ids) {
+        for segment_entry in &mut segment_entries {
             let segment = index.segment(segment_entry.meta().clone());
-            if let Some(file_protection) =
-                advance_deletes(segment, &mut segment_entry, target_opstamp)?
-            {
+            if let Some(file_protection) = advance_deletes(segment, segment_entry, target_opstamp)? {
                 file_protections.push(file_protection);
             }
-            segment_entries.push(segment_entry);
-        } else {
-            error!("Error, had to abort merge as some of the segment is not managed anymore.");
-            let msg = format!(
-                "Segment {:?} requested for merge is not managed.",
-                segment_id
-            );
-            bail!(ErrorKind::InvalidArgument(msg));
         }
+
+        let delete_cursor = segment_entries[0].delete_cursor().clone();
+
+        let segments: Vec<Segment> = segment_entries
+            .iter()
+            .map(|segment_entry| index.segment(segment_entry.meta().clone()))
+            .collect();
+
+        // An IndexMerger is like a "view" of our merged segments.
+        let merger: IndexMerger = IndexMerger::open(schema, &segments[..])?;
+
+        // ... we just serialize this index merger in our new segment
+        // to merge the two segments.
+
+        let segment_serializer = SegmentSerializer::for_segment(&mut merged_segment)
+            .expect("Creating index serializer failed");
+
+        let num_docs = merger
+            .write(segment_serializer)
+            .expect("Serializing merged index failed");
+        let mut segment_meta = SegmentMeta::new(merged_segment.id());
+        segment_meta.set_max_doc(num_docs);
+
+        let after_merge_segment_entry = SegmentEntry::new(segment_meta.clone(), delete_cursor, None);
+        Ok(after_merge_segment_entry)
+
+    } else {
+        error!("Had to abort merge as some of the segment is not managed anymore.");
+        let msg = format!("Segment requested for merge is not managed.");
+        bail!(ErrorKind::InvalidArgument(msg));
     }
 
-    let delete_cursor = segment_entries[0].delete_cursor().clone();
-
-    let segments: Vec<Segment> = segment_entries
-        .iter()
-        .map(|segment_entry| index.segment(segment_entry.meta().clone()))
-        .collect();
-
-    // An IndexMerger is like a "view" of our merged segments.
-    let merger: IndexMerger = IndexMerger::open(schema, &segments[..])?;
-
-    // ... we just serialize this index merger in our new segment
-    // to merge the two segments.
-
-    let segment_serializer = SegmentSerializer::for_segment(&mut merged_segment)
-        .expect("Creating index serializer failed");
-
-    let num_docs = merger
-        .write(segment_serializer)
-        .expect("Serializing merged index failed");
-    let mut segment_meta = SegmentMeta::new(merged_segment.id());
-    segment_meta.set_max_doc(num_docs);
-
-    let after_merge_segment_entry = SegmentEntry::new(segment_meta.clone(), delete_cursor, None);
-    Ok(after_merge_segment_entry)
 }
 
 struct InnerSegmentUpdater {
